@@ -40,6 +40,7 @@ on:
 
 permissions:
   contents: write   # para apagar os PDFs já convertidos de input/
+  packages: read    # para baixar a imagem de produção do conversor
 
 # Uma conversão por vez; as seguintes esperam na fila.
 concurrency:
@@ -59,17 +60,47 @@ jobs:
 
     steps:
       - name: Baixar o repositório
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.ref }}   # pega a versão mais recente, não só a do push
 
-      - name: Preparar o Python
-        uses: actions/setup-python@v5
+      # O conversor usado aqui é a imagem de PRODUÇÃO publicada pela pipeline de
+      # CI/CD (ci-cd.yml). Se ela ainda não existir (primeira vez), usa o código
+      # do repositório direto com Python.
+      - name: Login no GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        continue-on-error: true
         with:
-          python-version: "3.12"
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Escolher o conversor
+        id: conversor
+        env:
+          # Por padrão, a imagem deste repositório. Para usar a de outro repositório
+          # (ex.: código público + biblioteca privada), defina a variável KINDLE_IMAGEM.
+          KINDLE_IMAGEM: ${{ vars.KINDLE_IMAGEM }}
+        run: |
+          imagem="${KINDLE_IMAGEM:-ghcr.io/${GITHUB_REPOSITORY,,}:producao}"
+          if docker pull -q "$imagem"; then
+            echo "Usando a imagem de produção: $imagem"
+            echo "modo=imagem" >> "$GITHUB_OUTPUT"
+            echo "imagem=$imagem" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Imagem de produção não encontrada; usando o código do repositório."
+            echo "modo=python" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Preparar o Python
+        if: steps.conversor.outputs.modo == 'python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
           cache: pip
 
       - name: Instalar dependências
+        if: steps.conversor.outputs.modo == 'python'
         run: pip install -r requirements.txt
 
       - name: Baixar PDF do link
@@ -90,10 +121,18 @@ jobs:
           fi
 
       - name: Converter
+        env:
+          MODO_CONVERSOR: ${{ steps.conversor.outputs.modo }}
+          IMAGEM: ${{ steps.conversor.outputs.imagem }}
         run: |
-          mkdir -p input
+          mkdir -p input output
+          if [ "$MODO_CONVERSOR" = "imagem" ]; then
+            conversor=(docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD:/dados" "$IMAGEM")
+          else
+            conversor=(python convert.py)
+          fi
           # shellcheck disable=SC2086
-          python convert.py input -o output \
+          "${conversor[@]}" input -o output \
             --modo "$MODO" --orientacao "$ORIENTACAO" --tipo "$TIPO" $OPCOES
 
       - name: Verificar resultado
@@ -110,7 +149,7 @@ jobs:
 
       - name: Disponibilizar para download
         if: ${{ !cancelled() && steps.resultado.outputs.tem == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kindle-${{ github.run_number }}
           path: output/
@@ -125,7 +164,16 @@ jobs:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
-        run: python send_to_kindle.py output
+          MODO_CONVERSOR: ${{ steps.conversor.outputs.modo }}
+          IMAGEM: ${{ steps.conversor.outputs.imagem }}
+        run: |
+          if [ "$MODO_CONVERSOR" = "imagem" ]; then
+            docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/dados" \
+              -e KINDLE_EMAIL -e SMTP_USER -e SMTP_PASSWORD -e SMTP_HOST -e SMTP_PORT -e SMTP_FROM \
+              --entrypoint python "$IMAGEM" /app/send_to_kindle.py output
+          else
+            python send_to_kindle.py output
+          fi
 
       - name: Apagar de input/ os PDFs já convertidos
         if: ${{ !cancelled() && steps.resultado.outputs.tem == 'true' }}

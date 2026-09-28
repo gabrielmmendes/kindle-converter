@@ -1,0 +1,67 @@
+# Volta a produção para uma versão anterior da imagem, sem recompilar nada.
+# As versões disponíveis são as releases (v1.1.0-42 → informe 1.1.0-42).
+
+name: Rollback de produção
+
+on:
+  workflow_dispatch:
+    inputs:
+      versao:
+        description: "Versão para restaurar (ex.: 1.1.0-42; veja as releases)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-refs/heads/main # não roda ao mesmo tempo que um deploy da pipeline
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: "CD · rollback de produção"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: producao
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validar a versão pedida
+        id: alvo
+        env:
+          VERSAO: ${{ inputs.versao }}
+        run: |
+          if [[ ! "$VERSAO" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]; then
+            echo "::error::Formato inválido: use algo como 1.1.0-42"; exit 1
+          fi
+          imagem="ghcr.io/${GITHUB_REPOSITORY,,}"
+          digest=$(docker buildx imagetools inspect "$imagem:$VERSAO" --format '{{json .Manifest}}' | jq -r .digest)
+          test -n "$digest" || { echo "::error::A versão $VERSAO não existe no registro"; exit 1; }
+          echo "imagem=$imagem" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restaurar produção
+        env:
+          IMAGEM: ${{ steps.alvo.outputs.imagem }}
+          DIGEST: ${{ steps.alvo.outputs.digest }}
+        run: |
+          docker buildx imagetools create --tag "$IMAGEM:producao" --tag "$IMAGEM:latest" "$IMAGEM@$DIGEST"
+
+      - name: Smoke test
+        env:
+          IMAGEM: ${{ steps.alvo.outputs.imagem }}
+          DIGEST: ${{ steps.alvo.outputs.digest }}
+          VERSAO: ${{ inputs.versao }}
+        run: |
+          atual=$(docker buildx imagetools inspect "$IMAGEM:producao" --format '{{json .Manifest}}' | jq -r .digest)
+          test "$atual" = "$DIGEST"
+          docker run --rm "$IMAGEM:producao" --version
+          echo "Produção restaurada para \`$VERSAO\` (\`$DIGEST\`)" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,54 @@
+[project]
+name = "kindle-converter"
+dynamic = ["version"]
+description = "Converte PDFs para leitura no Kindle mantendo o layout original"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = ["input", "output"]
+
+[tool.ruff.lint]
+# E/W: estilo | F: erros (pyflakes) | I: imports | B: bugs comuns | UP: sintaxe moderna
+# S: segurança (regras do Bandit) | SIM: simplificações | PT: boas práticas do pytest
+select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "PT"]
+ignore = [
+    "E741",   # nomes curtos como "l" em fórmulas
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["convert", "send_to_kindle", "fabrica_pdf"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",   # assert é o normal em testes
+    "PT018",  # asserts compostos deixam os testes mais curtos
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["convert", "send_to_kindle"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 85
+exclude_also = ['if __name__ == "__main__":']
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]

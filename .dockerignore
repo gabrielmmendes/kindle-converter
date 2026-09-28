@@ -1,0 +1,5 @@
+# A imagem só precisa do código do conversor e das dependências.
+*
+!convert.py
+!send_to_kindle.py
+!requirements.txt

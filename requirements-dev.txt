@@ -1,0 +1,8 @@
+-r requirements.txt
+pytest>=8.3
+pytest-cov>=6.0
+ruff>=0.15
+mypy>=1.15
+bandit[sarif,toml]>=1.8
+pip-audit>=2.9
+actionlint-py>=1.7.12

@@ -1,0 +1,554 @@
+# Pipeline de CI/CD do kindle-converter.
+#
+#   Pull request ──► CI (verificação estática + dinâmica + build da imagem)
+#   Push na main ──► CI ──► build/publicação ──► deploy em HOMOLOGAÇÃO (+ testes E2E)
+#   Manual       ──► tudo acima ──► deploy em PRODUÇÃO (+ smoke test + release)
+#
+# "Produção" é a imagem ghcr.io/<dono>/<repo>:producao, usada pelo workflow
+# convert.yml para converter os PDFs de verdade. Homologação é a tag
+# :homologacao, validada com testes de ponta a ponta antes de qualquer promoção.
+# A mesma imagem (mesmo digest) é promovida de um ambiente para o outro: nada é
+# recompilado entre homologação e produção.
+#
+# Detalhes de cada job e comando: docs/PIPELINE.md
+
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore: ["input/**", "**.md", "docs/**"]
+  push:
+    branches: [main]
+    paths-ignore: ["input/**", "**.md", "docs/**"]
+  workflow_dispatch:
+    inputs:
+      implantar_producao:
+        description: "Depois de homologação, implantar em PRODUÇÃO"
+        type: boolean
+        default: false
+
+# Menor privilégio: cada job pede só o que precisa.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  # PR novo cancela a execução antiga; na main nada é interrompido no meio de um deploy.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.13"
+  REGISTRO: ghcr.io
+  # Recursos que exigem GitHub Code Security / Enterprise em repositórios privados
+  # (CodeQL, dependency review, atestado de proveniência). Em repositório público
+  # rodam sempre; em privado, defina a variável GHAS_HABILITADO=true se tiver o plano.
+  SEGURANCA_AVANCADA: ${{ github.event.repository.private == false || vars.GHAS_HABILITADO == 'true' }}
+
+jobs:
+  # ========================================================================== #
+  # CI · VERIFICAÇÃO ESTÁTICA (analisa o código sem executá-lo)
+  # ========================================================================== #
+  lint:
+    name: "Estática · lint, formatação e tipos"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Instalar ferramentas
+        run: pip install -r requirements-dev.txt
+      - name: Ruff (erros, estilo, boas práticas e regras de segurança)
+        run: ruff check --output-format=github .
+      - name: Ruff (formatação)
+        run: ruff format --check --diff .
+      - name: Mypy (checagem de tipos)
+        run: mypy convert.py send_to_kindle.py scripts/ tests/
+
+  infraestrutura:
+    name: "Estática · workflows e Dockerfile"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Actionlint (sintaxe e segurança dos workflows, com shellcheck)
+        run: |
+          pip install actionlint-py==1.7.12.25
+          actionlint -color
+      - name: Hadolint (boas práticas do Dockerfile)
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+  sast:
+    name: "Estática · segurança do código (Bandit + Trivy)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # publicar achados na aba Security (quando disponível)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Instalar Bandit
+        run: pip install "bandit[sarif,toml]>=1.8"
+      - name: Bandit (relatório SARIF completo)
+        run: bandit -c pyproject.toml -r . -f sarif -o bandit.sarif --exit-zero
+      - name: Bandit (barra severidade média ou alta)
+        run: bandit -c pyproject.toml -r . --severity-level medium --confidence-level medium
+      - name: Trivy (segredos, configurações e vulnerabilidades no repositório)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: trivy-repo.sarif
+      - name: Guardar relatórios SARIF
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sarif-sast
+          path: "*.sarif"
+          if-no-files-found: ignore
+      - name: Publicar Bandit na aba Security
+        if: ${{ !cancelled() && env.SEGURANCA_AVANCADA == 'true' }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        continue-on-error: true # só publica; quem barra é a ferramenta no passo anterior
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+      - name: Publicar Trivy na aba Security
+        if: ${{ !cancelled() && env.SEGURANCA_AVANCADA == 'true' && hashFiles('trivy-repo.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        continue-on-error: true # só publica; quem barra é a ferramenta no passo anterior
+        with:
+          sarif_file: trivy-repo.sarif
+          category: trivy-repositorio
+
+  codeql:
+    name: "Estática · CodeQL (${{ matrix.linguagem }})"
+    # Em repositório privado exige GitHub Code Security (veja SEGURANCA_AVANCADA).
+    if: ${{ github.event.repository.private == false || vars.GHAS_HABILITADO == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        linguagem: [python, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.linguagem }}
+          build-mode: none
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: "/language:${{ matrix.linguagem }}"
+
+  dependencias:
+    name: "Estática · dependências (SCA)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write # comentário do dependency review no PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: pip-audit (vulnerabilidades conhecidas nas dependências)
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: requirements.txt requirements-dev.txt
+      - name: Dependency review (dependências novas no PR)
+        if: ${{ github.event_name == 'pull_request' && env.SEGURANCA_AVANCADA == 'true' }}
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+
+  # ========================================================================== #
+  # CI · VERIFICAÇÃO DINÂMICA (executa o código)
+  # ========================================================================== #
+  testes:
+    name: "Dinâmica · testes (${{ matrix.os }}, Python ${{ matrix.python }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Instalar dependências
+        run: pip install -r requirements-dev.txt
+      - name: Testes unitários e de integração (com cobertura mínima de 85%)
+        run: pytest --cov --cov-report=xml --cov-report=term --junitxml=junit.xml
+      - name: Cobertura no resumo do job
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.13' }}
+        shell: bash
+        run: |
+          {
+            echo "## Cobertura de testes"
+            coverage report --format=markdown
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Guardar resultados
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: testes-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            junit.xml
+            coverage.xml
+          retention-days: 14
+
+  # ========================================================================== #
+  # BUILD · imagem Docker (o artefato que vai para os ambientes)
+  # ========================================================================== #
+  imagem:
+    name: "Build · imagem, smoke test, scan e SBOM"
+    needs: [lint, infraestrutura, sast, dependencias, testes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # publicar no GitHub Container Registry
+      security-events: write
+      id-token: write # atestado de proveniência
+      attestations: write
+    outputs:
+      imagem: ${{ steps.vars.outputs.imagem }}
+      versao: ${{ steps.vars.outputs.versao }}
+      tag: ${{ steps.vars.outputs.tag }}
+      digest: ${{ steps.publicar.outputs.digest }}
+      pacote_url: ${{ steps.vars.outputs.pacote_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Definir nome e versão da imagem
+        id: vars
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"   # o registro só aceita minúsculas
+          versao=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' convert.py)
+          test -n "$versao" || { echo "::error::__version__ não encontrado em convert.py"; exit 1; }
+          {
+            echo "imagem=${REGISTRO}/${repo}"
+            echo "versao=${versao}"
+            echo "tag=${versao}-${GITHUB_RUN_NUMBER}"
+            echo "pacote_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pkgs/container/${repo#*/}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Metadados (tags e labels OCI)
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.vars.outputs.imagem }}
+          tags: |
+            type=raw,value=${{ steps.vars.outputs.tag }}
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.version=${{ steps.vars.outputs.tag }}
+
+      - name: Build (carrega a imagem localmente para testar antes de publicar)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test da imagem
+        env:
+          IMAGEM: ${{ steps.vars.outputs.imagem }}:${{ steps.vars.outputs.tag }}
+          VERSAO: ${{ steps.vars.outputs.versao }}
+        run: |
+          docker run --rm "$IMAGEM" --version | tee versao.txt
+          grep -q "$VERSAO" versao.txt
+          mkdir -p smoke
+          rodar() { docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD/smoke:/dados" "$@"; }
+          # gera um PDF de uma página com a própria imagem e converte
+          rodar --entrypoint python "$IMAGEM" -c "
+          import pymupdf
+          d = pymupdf.open(); p = d.new_page()
+          p.insert_textbox(p.rect + (72, 72, -72, -72), 'Teste de fumaça. ' * 60, fontsize=11)
+          d.save('/dados/smoke.pdf')"
+          rodar "$IMAGEM" smoke.pdf -o saida
+          test -s smoke/saida/smoke_kindle.pdf
+          # o contêiner não roda como root
+          test "$(docker run --rm --entrypoint id "$IMAGEM" -u)" != "0"
+
+      - name: Trivy (vulnerabilidades da imagem, relatório SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.vars.outputs.imagem }}:${{ steps.vars.outputs.tag }}
+          format: sarif
+          output: trivy-imagem.sarif
+          exit-code: "0"
+
+      - name: Trivy (barra falhas altas ou críticas com correção disponível)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true" # reaproveita a base baixada no passo anterior
+        with:
+          image-ref: ${{ steps.vars.outputs.imagem }}:${{ steps.vars.outputs.tag }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Publicar Trivy na aba Security
+        if: ${{ !cancelled() && env.SEGURANCA_AVANCADA == 'true' && hashFiles('trivy-imagem.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        continue-on-error: true # só publica; quem barra é a ferramenta no passo anterior
+        with:
+          sarif_file: trivy-imagem.sarif
+          category: trivy-imagem
+
+      - name: SBOM (lista de componentes da imagem)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ steps.vars.outputs.imagem }}:${{ steps.vars.outputs.tag }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom.spdx.json
+          upload-release-assets: false
+
+      # --- daqui para baixo, só na main: PRs param aqui --------------------- #
+      - name: Login no GitHub Container Registry
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRO }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publicar a imagem testada
+        id: publicar
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        env:
+          REPOSITORIO: ${{ steps.vars.outputs.imagem }}
+          IMAGEM: ${{ steps.vars.outputs.imagem }}:${{ steps.vars.outputs.tag }}
+        run: |
+          # publica exatamente a imagem que passou no smoke test e no Trivy
+          docker push --all-tags "$REPOSITORIO"
+          digest=$(docker buildx imagetools inspect "$IMAGEM" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Imagem publicada: \`$IMAGEM\` (\`$digest\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Atestado de proveniência (SLSA)
+        if: ${{ steps.publicar.outcome == 'success' && env.SEGURANCA_AVANCADA == 'true' }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.vars.outputs.imagem }}
+          subject-digest: ${{ steps.publicar.outputs.digest }}
+          push-to-registry: true
+
+  # ========================================================================== #
+  # CD · AMBIENTE 1: HOMOLOGAÇÃO
+  # ========================================================================== #
+  homologacao:
+    name: "CD · deploy em homologação + testes E2E"
+    needs: imagem
+    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: homologacao
+      url: ${{ needs.imagem.outputs.pacote_url }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGEM: ${{ needs.imagem.outputs.imagem }}
+      DIGEST: ${{ needs.imagem.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRO }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy (promove o digest para a tag :homologacao)
+        run: |
+          docker buildx imagetools create --tag "$IMAGEM:homologacao" "$IMAGEM@$DIGEST"
+          docker pull -q "$IMAGEM:homologacao"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar dependências do verificador
+        run: pip install -r requirements.txt
+
+      - name: Testes de ponta a ponta contra a imagem de homologação
+        env:
+          VERSAO: ${{ needs.imagem.outputs.versao }}
+        run: |
+          mkdir -p e2e
+          python scripts/e2e.py --pasta e2e --prefixo /dados --versao "$VERSAO" --limite-segundos 240 \
+            --conversor "docker run --rm --network none --user $(id -u):$(id -g) -v $PWD/e2e:/dados $IMAGEM:homologacao"
+
+      - name: Guardar os PDFs gerados (para conferir num Kindle de teste)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-homologacao
+          path: e2e/saida/
+          retention-days: 14
+
+      - name: Entrega real num Kindle de teste (opcional)
+        # Ligue com a variável ENVIAR_KINDLE_TESTE=true e os secrets do ambiente homologacao.
+        if: ${{ vars.ENVIAR_KINDLE_TESTE == 'true' }}
+        env:
+          KINDLE_EMAIL: ${{ secrets.KINDLE_EMAIL }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/e2e:/dados" \
+            -e KINDLE_EMAIL -e SMTP_USER -e SMTP_PASSWORD -e SMTP_HOST -e SMTP_PORT \
+            --entrypoint python "$IMAGEM:homologacao" /app/send_to_kindle.py saida/padrao
+
+  # ========================================================================== #
+  # CD · AMBIENTE 2: PRODUÇÃO
+  # ========================================================================== #
+  producao:
+    name: "CD · deploy em produção + smoke test + release"
+    needs: [imagem, homologacao]
+    # Só com decisão humana: execução manual com "implantar_producao", ou aprovação
+    # no ambiente (revisores obrigatórios) quando PRODUCAO_COM_APROVACAO=true.
+    if: >-
+      ${{ github.ref == 'refs/heads/main' &&
+          (inputs.implantar_producao || vars.PRODUCAO_COM_APROVACAO == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: producao
+      url: ${{ steps.release.outputs.url }}
+    permissions:
+      contents: write # criar a release
+      packages: write
+    env:
+      IMAGEM: ${{ needs.imagem.outputs.imagem }}
+      DIGEST: ${{ needs.imagem.outputs.digest }}
+      TAG: ${{ needs.imagem.outputs.tag }}
+      VERSAO: ${{ needs.imagem.outputs.versao }}
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRO }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Guardar a versão que está em produção (para rollback)
+        run: |
+          anterior=$(docker buildx imagetools inspect "$IMAGEM:producao" --format '{{json .Manifest}}' 2>/dev/null \
+            | jq -r '.digest // empty' || true)
+          echo "Produção antes deste deploy: ${anterior:-nenhuma}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy (promove o mesmo digest validado em homologação)
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGEM:producao" --tag "$IMAGEM:latest" --tag "$IMAGEM:$VERSAO" \
+            "$IMAGEM@$DIGEST"
+
+      - name: Smoke test pós-deploy
+        run: |
+          atual=$(docker buildx imagetools inspect "$IMAGEM:producao" --format '{{json .Manifest}}' | jq -r .digest)
+          test "$atual" = "$DIGEST" || { echo "::error::produção aponta para $atual, esperado $DIGEST"; exit 1; }
+          docker pull -q "$IMAGEM:producao"
+          docker run --rm "$IMAGEM:producao" --version | grep -q "$VERSAO"
+          mkdir -p smoke
+          rodar() { docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD/smoke:/dados" "$@"; }
+          rodar --entrypoint python "$IMAGEM:producao" -c "
+          import pymupdf
+          d = pymupdf.open(); p = d.new_page()
+          p.insert_textbox(p.rect + (72, 72, -72, -72), 'Produção ok. ' * 60, fontsize=11)
+          d.save('/dados/p.pdf')"
+          rodar "$IMAGEM:producao" p.pdf -o saida
+          test -s smoke/saida/p_kindle.pdf
+
+      - name: Baixar o SBOM gerado no build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom.spdx.json
+
+      - name: Criar release
+        id: release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: v${{ env.TAG }}
+          name: kindle-converter ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          make_latest: "true"
+          files: "**/*.spdx.json"
+          body: |
+            Implantado em produção.
+
+            **Imagem:** `${{ env.IMAGEM }}:producao`
+            **Digest:** `${{ env.DIGEST }}`
+
+            ```bash
+            docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/dados" ${{ env.IMAGEM }}:${{ env.TAG }} livro.pdf
+            ```
+
+            Para voltar a esta versão: Actions → Rollback de produção → `${{ env.TAG }}`.
+
+      - name: Resumo
+        run: |
+          {
+            echo "## Produção atualizada"
+            echo "- Imagem: \`$IMAGEM:producao\` → \`$DIGEST\`"
+            echo "- Versão: \`$TAG\`"
+            echo "- Release: ${{ steps.release.outputs.url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

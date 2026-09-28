@@ -15,6 +15,7 @@ O remetente precisa estar na "Lista de e-mails aprovados" da sua conta Amazon.
 Uso:
     python send_to_kindle.py output/
 """
+
 from __future__ import annotations
 
 import os
@@ -47,6 +48,7 @@ def main() -> int:
         return 0
 
     contexto = ssl.create_default_context()
+    smtp: smtplib.SMTP
     if porta == 465:
         smtp = smtplib.SMTP_SSL(host, porta, context=contexto, timeout=120)
     else:
@@ -59,9 +61,11 @@ def main() -> int:
         for arq in arquivos:
             mb = arq.stat().st_size / 1_048_576
             if mb > LIMITE_MB:
-                print(f"::warning::{arq.name} tem {mb:.0f} MB (limite do Kindle por e-mail: "
-                      f"{LIMITE_MB} MB). Baixe pelo artifact e copie por USB, ou converta "
-                      f"em partes com --paginas.")
+                print(
+                    f"::warning::{arq.name} tem {mb:.0f} MB (limite do Kindle por e-mail: "
+                    f"{LIMITE_MB} MB). Baixe pelo artifact e copie por USB, ou converta "
+                    f"em partes com --paginas."
+                )
                 falhas += 1
                 continue
             msg = EmailMessage()
@@ -71,8 +75,7 @@ def main() -> int:
             msg["From"] = remetente
             msg["To"] = destino
             msg.set_content("Enviado automaticamente pelo kindle-converter.")
-            msg.add_attachment(arq.read_bytes(), maintype="application", subtype="pdf",
-                               filename=arq.name)
+            msg.add_attachment(arq.read_bytes(), maintype="application", subtype="pdf", filename=arq.name)
             try:
                 smtp.send_message(msg)
                 print(f"Enviado: {arq.name} ({mb:.1f} MB)")

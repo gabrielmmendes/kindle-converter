@@ -131,16 +131,34 @@ Requer Python 3.10 ou mais novo.
 - **Tamanho:** o envio por e-mail aceita até 50 MB por arquivo. No tipo `imagem`, cada tela ocupa uns 55 KB, então um livro de 350 páginas A5 fica em torno de 23 MB. Para livros maiores, divida com `--paginas` ou baixe pelo artifact e copie por USB. O Git também recusa arquivos acima de 100 MB em `input/`. Nesse caso, use a opção B com um link.
 - **Minutos do GitHub Actions:** repositórios privados têm 2.000 minutos grátis por mês. Um livro de 350 páginas leva uns 2 minutos.
 - **Links internos** do PDF (notas, referências cruzadas) não são mantidos. O sumário é mantido.
-- **Tipo `vetorial`:** a busca pode encontrar texto de trechos vizinhos, porque o recorte esconde o resto da página mas não o remove.
 - **Layouts incomuns** (revistas com caixas de texto espalhadas, formulários) podem sair na ordem errada. Nesses casos, use `--modo largura` ou `--modo pagina`.
 - Use apenas com documentos que você tem direito de copiar para uso pessoal.
+
+## Desenvolvimento e CI/CD
+
+O projeto tem uma pipeline completa em `.github/workflows/ci-cd.yml`, explicada em [`docs/PIPELINE.md`](docs/PIPELINE.md):
+
+- **Verificação estática:** Ruff, Mypy, actionlint, Hadolint, Bandit, Trivy, CodeQL, pip-audit e dependency review.
+- **Verificação dinâmica:** 58 testes automatizados em 3 sistemas e 2 versões de Python (cobertura mínima de 85%), smoke test da imagem e teste de ponta a ponta com conferência palavra por palavra, robustez e desempenho.
+- **Dois ambientes:** **homologação** (automático a cada push na `main`) e **produção** (só com decisão humana), com a mesma imagem Docker promovida de um para o outro, release automática e rollback.
+
+O `convert.yml` usa a imagem de **produção**. Enquanto ela não existir, usa o código do repositório.
 
 ## Estrutura
 
 ```
-convert.py                      conversor (PyMuPDF + Pillow + NumPy)
-send_to_kindle.py               envio por e-mail (Send to Kindle)
-requirements.txt
-input/                          coloque os PDFs aqui
-.github/workflows/convert.yml   automação no GitHub Actions
+convert.py                        conversor (PyMuPDF + Pillow + NumPy)
+send_to_kindle.py                 envio por e-mail (Send to Kindle)
+Dockerfile, .dockerignore         imagem do conversor
+requirements.txt                  dependências da aplicação
+requirements-dev.txt              ferramentas de teste e análise
+pyproject.toml                    configuração de Ruff, Mypy, pytest, cobertura e Bandit
+input/                            coloque os PDFs aqui
+tests/                            testes automatizados (pytest) e gerador de PDFs de teste
+scripts/e2e.py                    teste de ponta a ponta usado em homologação
+docs/PIPELINE.md                  documentação da pipeline
+.github/workflows/convert.yml     conversão dos PDFs (usa a imagem de produção)
+.github/workflows/ci-cd.yml       pipeline de CI/CD
+.github/workflows/rollback.yml    volta produção para uma versão anterior
+.github/dependabot.yml            atualizações automáticas de dependências
 ```

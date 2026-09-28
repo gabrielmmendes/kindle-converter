@@ -22,6 +22,7 @@ Exemplos:
     python convert.py hq.pdf --modo pagina
     python convert.py livro.pdf --tipo vetorial        # mantém o texto pesquisável
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,22 +33,33 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pymupdf
 from PIL import Image
 
+__version__ = "1.1.0"
+
+
+class Modelo(NamedTuple):
+    nome: str
+    largura: int  # pixels
+    altura: int  # pixels
+    ppi: int
+
+
 MODELOS = {
-    "basico": {"nome": "Kindle básico 10ª geração", "largura": 600, "altura": 800, "ppi": 167},
-    "paperwhite": {"nome": "Kindle Paperwhite 10ª geração", "largura": 1072, "altura": 1448, "ppi": 300},
+    "basico": Modelo("Kindle básico 10ª geração", 600, 800, 167),
+    "paperwhite": Modelo("Kindle Paperwhite 10ª geração", 1072, 1448, 300),
 }
 
-LIMIAR_TINTA = 210          # pixel mais escuro que isso (0-255) conta como conteúdo
-ESCALA_ANALISE = 2.0        # a análise do layout é feita a 144 dpi
-MAX_PIXELS_ANALISE = 2400   # limite para páginas muito grandes
-SUPERAMOSTRAGEM = 2         # renderiza 2x maior e reduz com Lanczos (texto mais limpo)
-AMPLIACAO_MAXIMA = 1.6      # nunca aumenta o texto mais que 1,6x o tamanho impresso
-MM = 72 / 25.4              # pontos por milímetro
+LIMIAR_TINTA = 210  # pixel mais escuro que isso (0-255) conta como conteúdo
+ESCALA_ANALISE = 2.0  # a análise do layout é feita a 144 dpi
+MAX_PIXELS_ANALISE = 2400  # limite para páginas muito grandes
+SUPERAMOSTRAGEM = 2  # renderiza 2x maior e reduz com Lanczos (texto mais limpo)
+AMPLIACAO_MAXIMA = 1.6  # nunca aumenta o texto mais que 1,6x o tamanho impresso
+MM = 72 / 25.4  # pontos por milímetro
 
 
 # --------------------------------------------------------------------------- #
@@ -56,6 +68,7 @@ MM = 72 / 25.4              # pontos por milímetro
 @dataclass
 class Faixa:
     """Área contínua de leitura: página inteira, uma coluna ou um bloco largo."""
+
     x0: int
     x1: int
     y0: int
@@ -66,13 +79,14 @@ class Faixa:
 @dataclass(eq=False)
 class Colocacao:
     """Um recorte da página original desenhado em uma tela do Kindle."""
+
     pagina: int
-    clip: pymupdf.Rect                      # em pontos, na página original
-    destino: list[float]                    # x, y, largura, altura em pixels da tela
-    chave: tuple | None = None              # identifica a faixa (para emendar blocos)
-    escala: float = 1.0                     # px de análise por ponto
-    k: float = 1.0                          # px de tela por px de análise
-    x_px: tuple[int, int] = (0, 0)          # faixa horizontal (px de análise)
+    clip: pymupdf.Rect  # em pontos, na página original
+    destino: list[float]  # x, y, largura, altura em pixels da tela
+    chave: tuple | None = None  # identifica a faixa (para emendar blocos)
+    escala: float = 1.0  # px de análise por ponto
+    k: float = 1.0  # px de tela por px de análise
+    x_px: tuple[int, int] = (0, 0)  # faixa horizontal (px de análise)
     blocos: list[tuple[int, int]] = field(default_factory=list)  # linhas incluídas
 
     @property
@@ -95,8 +109,8 @@ class Opcoes:
     formato: str
     gama: float
     realce: bool
-    ignorar_topo: float      # pontos
-    ignorar_base: float      # pontos
+    ignorar_topo: float  # pontos
+    ignorar_base: float  # pontos
     nova_tela_por_pagina: bool
     paginas: str | None
 
@@ -108,7 +122,7 @@ def trechos(mascara: np.ndarray) -> list[tuple[int, int]]:
     """Sequências de True em um vetor booleano, como pares (início, fim)."""
     m = np.concatenate(([False], mascara, [False])).astype(np.int8)
     d = np.diff(m)
-    return list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist()))
+    return list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist(), strict=False))
 
 
 def intervalo_paginas(texto: str | None, total: int) -> list[int]:
@@ -142,8 +156,7 @@ def escala_da_pagina(pagina: pymupdf.Page) -> float:
 
 
 def mapa_de_tinta(pagina: pymupdf.Page, escala: float, opc: Opcoes) -> np.ndarray:
-    pix = pagina.get_pixmap(matrix=pymupdf.Matrix(escala, escala),
-                            colorspace=pymupdf.csGRAY, alpha=False)
+    pix = pagina.get_pixmap(matrix=pymupdf.Matrix(escala, escala), colorspace=pymupdf.csGRAY, alpha=False)
     tinta = pixmap_para_array(pix) < LIMIAR_TINTA
     topo = int(opc.ignorar_topo * escala)
     base = int(opc.ignorar_base * escala)
@@ -186,8 +199,7 @@ def detectar_calha(tinta: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> tup
 
     minimo = max(10, int(largura * 0.012))
     maximo = int(largura * 0.15)
-    opcoes = [(a, b) for a, b in trechos(candidatos)
-              if minimo <= b - a <= maximo and a >= i0 and b <= i1]
+    opcoes = [(a, b) for a, b in trechos(candidatos) if minimo <= b - a <= maximo and a >= i0 and b <= i1]
     if not opcoes:
         return None
     centro = largura / 2
@@ -205,10 +217,10 @@ def detectar_calha(tinta: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> tup
     for i, j in blocos:
         if sub[i:j, :a].any():
             lado_esq += 1
-            encosta_esq += bool(sub[i:j, a - faixa:a].any())
+            encosta_esq += bool(sub[i:j, a - faixa : a].any())
         if sub[i:j, b:].any():
             lado_dir += 1
-            encosta_dir += bool(sub[i:j, b:b + faixa].any())
+            encosta_dir += bool(sub[i:j, b : b + faixa].any())
     if min(lado_esq, lado_dir) < 3:
         return None
     if encosta_esq < 0.5 * lado_esq or encosta_dir < 0.5 * lado_dir:
@@ -221,27 +233,28 @@ def fundir_fragmentos(blocos: list[tuple[int, int]]) -> list[tuple[int, int]]:
     if len(blocos) < 3:
         return blocos
     mediana = statistics.median(b - a for a, b in blocos)
-    blocos = [list(b) for b in blocos]
+    trabalho = [[a, b] for a, b in blocos]
     mudou = True
-    while mudou and len(blocos) > 1:
+    while mudou and len(trabalho) > 1:
         mudou = False
-        for i, (a, b) in enumerate(blocos):
+        for i, (a, b) in enumerate(trabalho):
             if b - a >= 0.35 * mediana:
                 continue
-            gap_ant = a - blocos[i - 1][1] if i > 0 else None
-            gap_prox = blocos[i + 1][0] - b if i + 1 < len(blocos) else None
+            gap_ant = a - trabalho[i - 1][1] if i > 0 else None
+            gap_prox = trabalho[i + 1][0] - b if i + 1 < len(trabalho) else None
             limite = 0.5 * mediana
-            opcoes = [(g, j) for g, j in ((gap_ant, i - 1), (gap_prox, i + 1))
-                      if g is not None and g <= limite]
+            opcoes = [
+                (g, j) for g, j in ((gap_ant, i - 1), (gap_prox, i + 1)) if g is not None and g <= limite
+            ]
             if not opcoes:
                 continue
             _, j = min(opcoes)
             k, m = min(i, j), max(i, j)
-            blocos[k] = [blocos[k][0], blocos[m][1]]
-            del blocos[m]
+            trabalho[k] = [trabalho[k][0], trabalho[m][1]]
+            del trabalho[m]
             mudou = True
             break
-    return [tuple(b) for b in blocos]
+    return [(a, b) for a, b in trabalho]
 
 
 def nova_faixa(tinta: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> Faixa | None:
@@ -253,8 +266,16 @@ def nova_faixa(tinta: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> Faixa |
     return Faixa(x0, x1, blocos[0][0], blocos[-1][1], blocos)
 
 
-def segmentar(tinta: np.ndarray, x0: int, x1: int, y0: int, y1: int,
-              detectar_colunas: bool, prof: int = 0, altura_min: int = 0) -> list[Faixa]:
+def segmentar(
+    tinta: np.ndarray,
+    x0: int,
+    x1: int,
+    y0: int,
+    y1: int,
+    detectar_colunas: bool,
+    prof: int = 0,
+    altura_min: int = 0,
+) -> list[Faixa]:
     """Divide uma área em faixas na ordem de leitura (detecta até 4 colunas)."""
     linhas = np.flatnonzero(tinta[y0:y1, x0:x1].any(axis=1))
     if len(linhas) == 0:
@@ -276,7 +297,7 @@ def segmentar(tinta: np.ndarray, x0: int, x1: int, y0: int, y1: int,
     folga = max(1, (gb - ga) // 4)
     ma, mb = ga + folga, gb - folga
     blocos = [(y0 + a, y0 + b) for a, b in trechos(tinta[y0:y1, x0:x1].any(axis=1))]
-    regioes: list[list] = []   # [tipo, início, fim]
+    regioes: list[list] = []  # [tipo, início, fim]
     for a, b in blocos:
         tipo = "largo" if tinta[a:b, ma:mb].any() else "colunas"
         if regioes and regioes[-1][0] == tipo:
@@ -354,9 +375,11 @@ def margens_do_documento(doc: pymupdf.Document, paginas: list[int], opc: Opcoes)
             valor = (caixa[0] / escala, caixa[1] / escala)
             grupos.setdefault(formato + (pno % 2,), []).append(valor)
             grupos.setdefault(formato, []).append(valor)
-    return {chave: (statistics.median(v[0] for v in valores),
-                    statistics.median(v[1] for v in valores))
-            for chave, valores in grupos.items() if len(valores) >= 3}
+    return {
+        chave: (statistics.median(v[0] for v in valores), statistics.median(v[1] for v in valores))
+        for chave, valores in grupos.items()
+        if len(valores) >= 3
+    }
 
 
 def margem_da_pagina(margens: dict, pagina: pymupdf.Page) -> tuple[float, float] | None:
@@ -370,14 +393,14 @@ def margem_da_pagina(margens: dict, pagina: pymupdf.Page) -> tuple[float, float]
 class Paginador:
     def __init__(self, opc: Opcoes):
         self.W, self.H = opc.largura, opc.altura
-        self.margem = round(self.W * 0.015)          # respiro nas laterais da tela
-        self.Wu = self.W - 2 * self.margem           # largura útil
+        self.margem = round(self.W * 0.015)  # respiro nas laterais da tela
+        self.Wu = self.W - 2 * self.margem  # largura útil
         self.ampliacao_max = AMPLIACAO_MAXIMA * opc.ppi / 72  # px de tela por ponto
         self.espaco_entre_faixas = round(self.H * 0.025)
         self.telas: list[Tela] = [Tela()]
         self.y = 0.0
         self.primeira_tela: dict[int, int] = {}
-        self.escalas: list[float] = []   # px de tela por ponto, para estatística
+        self.escalas: list[float] = []  # px de tela por ponto, para estatística
 
     @property
     def atual(self) -> Tela:
@@ -412,12 +435,13 @@ class Paginador:
             dx = self._dx(largura, k)
             self.escalas.append(k * escala)
             # Espaço bem maior que o normal entre linhas indica título/nova seção.
-            lacunas = [b[0] - a[1] for a, b in zip(faixa.blocos, faixa.blocos[1:])]
+            lacunas = [b[0] - a[1] for a, b in zip(faixa.blocos, faixa.blocos[1:], strict=False)]
             limite_titulo = 2.5 * statistics.median(lacunas) + 2 if len(lacunas) >= 3 else None
             anterior = None
             for a, b in faixa.blocos:
-                self._adicionar_bloco(pno, escala, tinta, faixa, (pno, i), a, b, k, dx,
-                                      anterior, limite_titulo)
+                self._adicionar_bloco(
+                    pno, escala, tinta, faixa, (pno, i), a, b, k, dx, anterior, limite_titulo
+                )
                 anterior = b
 
     def _adicionar_bloco(self, pno, escala, tinta, faixa, chave, a, b, k, dx, anterior, limite_titulo):
@@ -435,14 +459,19 @@ class Paginador:
             else:
                 gap = self.espaco_entre_faixas
             if self.y + gap + h <= self.H + 0.5:
-                if continua:
+                if continua and ultima is not None:
                     self._estender(ultima, [(a, b)])
                 else:
                     self._colocar(pno, escala, faixa.x0, faixa.x1, a, b, k, dx, self.y + gap, chave)
                 self.y += gap + h
                 return
             # Não coube: se a tela termina com um título, ele desce junto para a próxima.
-            if tentativa == 0 and continua and self._mover_titulo(ultima, limite_titulo, dx):
+            if (
+                tentativa == 0
+                and continua
+                and ultima is not None
+                and self._mover_titulo(ultima, limite_titulo, dx)
+            ):
                 continue
             break
         self.nova_tela()
@@ -487,8 +516,7 @@ class Paginador:
         c.clip.y1 = c.fim_px / c.escala
         c.destino[3] = (c.fim_px - c.blocos[0][0]) * c.k
         self.nova_tela()
-        novo = self._colocar(c.pagina, c.escala, *c.x_px, movidos[0][0], movidos[0][1],
-                             c.k, dx, 0.0, c.chave)
+        novo = self._colocar(c.pagina, c.escala, *c.x_px, movidos[0][0], movidos[0][1], c.k, dx, 0.0, c.chave)
         self._estender(novo, movidos[1:])
         self.y = novo.destino[3]
         return True
@@ -507,7 +535,7 @@ class Paginador:
         # Muito alto: corta nos pontos com menos tinta (entre linhas, se houver).
         dx = self._dx(faixa.x1 - faixa.x0, k)
         max_px = int(self.H / k)
-        tinta_por_linha = tinta[a:b, faixa.x0:faixa.x1].sum(axis=1)
+        tinta_por_linha = tinta[a:b, faixa.x0 : faixa.x1].sum(axis=1)
         ini = a
         while ini < b:
             if b - ini <= max_px:
@@ -544,15 +572,12 @@ def realcar(arr: np.ndarray, gama: float, realce: bool) -> np.ndarray:
         fundo = float(np.percentile(a, 60))
         branco = fundo if fundo > 170 else 255.0
         preto = min(float(np.percentile(a, 0.5)), 80.0)
-        if branco - preto > 30:
-            a = (a - preto) / (branco - preto)
-        else:
-            a = a / 255.0
+        a = (a - preto) / (branco - preto) if branco - preto > 30 else a / 255.0
         a = np.clip(a, 0.0, 1.0)
     else:
         a = a / 255.0
     if gama and gama != 1.0:
-        a = a ** gama
+        a = a**gama
     return (np.round(a * 15) * 17).astype(np.uint8)  # 16 tons de cinza
 
 
@@ -562,8 +587,9 @@ def renderizar_tela(doc: pymupdf.Document, tela: Tela, opc: Opcoes) -> Image.Ima
         dx, dy, dw, dh = c.destino
         largura, altura = max(1, round(dw)), max(1, round(dh))
         fator = dw / c.clip.width * SUPERAMOSTRAGEM
-        pix = doc[c.pagina].get_pixmap(matrix=pymupdf.Matrix(fator, fator), clip=c.clip,
-                                       colorspace=pymupdf.csGRAY, alpha=False)
+        pix = doc[c.pagina].get_pixmap(
+            matrix=pymupdf.Matrix(fator, fator), clip=c.clip, colorspace=pymupdf.csGRAY, alpha=False
+        )
         img = Image.fromarray(pixmap_para_array(pix).copy())
         img = img.resize((largura, altura), Image.Resampling.LANCZOS)
         img = Image.fromarray(realcar(np.asarray(img), opc.gama, opc.realce))
@@ -624,8 +650,13 @@ def localizar_tela(telas: list[Tela], pno: int, ponto: pymupdf.Point | None) -> 
     return None
 
 
-def copiar_sumario(doc: pymupdf.Document, saida: pymupdf.Document, paginas: list[int],
-                   telas: list[Tela], primeira_tela: dict[int, int]):
+def copiar_sumario(
+    doc: pymupdf.Document,
+    saida: pymupdf.Document,
+    paginas: list[int],
+    telas: list[Tela],
+    primeira_tela: dict[int, int],
+):
     sumario = doc.get_toc(simple=False)
     if not sumario:
         return
@@ -733,13 +764,15 @@ def converter(caminho: Path, pasta_saida: Path, opc: Opcoes) -> Path:
         saida = gerador(doc, telas, opc, destino, ao_progredir)
         copiar_sumario(doc, saida, paginas, telas, paginador.primeira_tela)
         meta = doc.metadata or {}
-        saida.set_metadata({
-            "title": (meta.get("title") or "").strip() or caminho.stem,
-            "author": meta.get("author") or "",
-            "subject": meta.get("subject") or "",
-            "creator": "kindle-converter",
-            "producer": f"PyMuPDF {pymupdf.VersionBind}",
-        })
+        saida.set_metadata(
+            {
+                "title": (meta.get("title") or "").strip() or caminho.stem,
+                "author": meta.get("author") or "",
+                "subject": meta.get("subject") or "",
+                "creator": "kindle-converter",
+                "producer": f"PyMuPDF {pymupdf.VersionBind}",
+            }
+        )
         saida.save(destino, garbage=3, deflate=True)
         saida.close()
     doc.close()
@@ -771,29 +804,60 @@ def main(argv=None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__.split("Exemplos:")[1] if "Exemplos:" in __doc__ else None,
     )
+    ap.add_argument("--version", action="version", version=f"kindle-converter {__version__}")
     ap.add_argument("entradas", nargs="+", help="arquivos PDF ou pastas com PDFs")
     ap.add_argument("-o", "--destino", default="output", help="pasta de saída (padrão: output)")
-    ap.add_argument("--modelo", choices=MODELOS, default="basico",
-                    help="modelo do Kindle (padrão: basico, 600x800)")
-    ap.add_argument("--modo", choices=["auto", "largura", "pagina"], default="auto",
-                    help="auto: detecta colunas | largura: uma coluna só | "
-                         "pagina: página inteira em cada tela (HQs, slides, partituras)")
-    ap.add_argument("--orientacao", choices=["retrato", "paisagem"], default="retrato",
-                    help="paisagem deixa a letra ~33%% maior (gire o Kindle para ler)")
-    ap.add_argument("--tipo", choices=["imagem", "vetorial"], default="imagem",
-                    help="imagem: mais nítido no e-ink | vetorial: mantém o texto pesquisável")
-    ap.add_argument("--formato", choices=["pdf", "cbz"], default="pdf",
-                    help="cbz: para usar no Kindle Comic Converter (KCC)")
-    ap.add_argument("--gama", type=float, default=1.6,
-                    help="escurece o texto fino; 1.0 desliga (padrão: 1.6)")
-    ap.add_argument("--sem-realce", action="store_true",
-                    help="não ajusta contraste nem fundo (fotos, PDFs coloridos)")
-    ap.add_argument("--ignorar-topo", type=float, default=0, metavar="MM",
-                    help="descarta N mm do topo de cada página (cabeçalho)")
-    ap.add_argument("--ignorar-base", type=float, default=0, metavar="MM",
-                    help="descarta N mm da base de cada página (rodapé, nº de página)")
-    ap.add_argument("--nova-tela-por-pagina", action="store_true",
-                    help="cada página original começa em uma tela nova")
+    ap.add_argument(
+        "--modelo", choices=MODELOS, default="basico", help="modelo do Kindle (padrão: basico, 600x800)"
+    )
+    ap.add_argument(
+        "--modo",
+        choices=["auto", "largura", "pagina"],
+        default="auto",
+        help="auto: detecta colunas | largura: uma coluna só | "
+        "pagina: página inteira em cada tela (HQs, slides, partituras)",
+    )
+    ap.add_argument(
+        "--orientacao",
+        choices=["retrato", "paisagem"],
+        default="retrato",
+        help="paisagem deixa a letra ~33%% maior (gire o Kindle para ler)",
+    )
+    ap.add_argument(
+        "--tipo",
+        choices=["imagem", "vetorial"],
+        default="imagem",
+        help="imagem: mais nítido no e-ink | vetorial: mantém o texto pesquisável",
+    )
+    ap.add_argument(
+        "--formato",
+        choices=["pdf", "cbz"],
+        default="pdf",
+        help="cbz: para usar no Kindle Comic Converter (KCC)",
+    )
+    ap.add_argument(
+        "--gama", type=float, default=1.6, help="escurece o texto fino; 1.0 desliga (padrão: 1.6)"
+    )
+    ap.add_argument(
+        "--sem-realce", action="store_true", help="não ajusta contraste nem fundo (fotos, PDFs coloridos)"
+    )
+    ap.add_argument(
+        "--ignorar-topo",
+        type=float,
+        default=0,
+        metavar="MM",
+        help="descarta N mm do topo de cada página (cabeçalho)",
+    )
+    ap.add_argument(
+        "--ignorar-base",
+        type=float,
+        default=0,
+        metavar="MM",
+        help="descarta N mm da base de cada página (rodapé, nº de página)",
+    )
+    ap.add_argument(
+        "--nova-tela-por-pagina", action="store_true", help="cada página original começa em uma tela nova"
+    )
     ap.add_argument("--paginas", help="intervalo, ex.: 1-20 ou 3,5,10-12")
     args = ap.parse_args(argv)
 
@@ -801,20 +865,30 @@ def main(argv=None) -> int:
         ap.error("o formato cbz só funciona com --tipo imagem")
 
     m = MODELOS[args.modelo]
-    largura, altura = m["largura"], m["altura"]
+    largura, altura = m.largura, m.altura
     if args.orientacao == "paisagem":
         largura, altura = altura, largura
-    opc = Opcoes(largura=largura, altura=altura, ppi=m["ppi"], modo=args.modo, tipo=args.tipo,
-                 formato=args.formato, gama=args.gama, realce=not args.sem_realce,
-                 ignorar_topo=args.ignorar_topo * MM, ignorar_base=args.ignorar_base * MM,
-                 nova_tela_por_pagina=args.nova_tela_por_pagina, paginas=args.paginas)
+    opc = Opcoes(
+        largura=largura,
+        altura=altura,
+        ppi=m.ppi,
+        modo=args.modo,
+        tipo=args.tipo,
+        formato=args.formato,
+        gama=args.gama,
+        realce=not args.sem_realce,
+        ignorar_topo=args.ignorar_topo * MM,
+        ignorar_base=args.ignorar_base * MM,
+        nova_tela_por_pagina=args.nova_tela_por_pagina,
+        paginas=args.paginas,
+    )
 
     arquivos = listar_pdfs(args.entradas)
     if not arquivos:
         print("Nenhum PDF encontrado.")
         return 0
 
-    print(f"{m['nome']}: telas de {largura}x{altura}, modo {args.modo}, tipo {args.tipo}")
+    print(f"{m.nome}: telas de {largura}x{altura}, modo {args.modo}, tipo {args.tipo}")
     falhas = 0
     for arq in arquivos:
         print(f"\n{arq}")
