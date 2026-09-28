@@ -28,6 +28,10 @@ COPY convert.py send_to_kindle.py ./
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin conversor
 USER 10001
 
+# Ferramenta de linha de comando: roda, converte e termina. Não há serviço
+# contínuo para monitorar, então o healthcheck é desligado explicitamente.
+HEALTHCHECK NONE
+
 WORKDIR /dados
 ENTRYPOINT ["python", "/app/convert.py"]
 CMD ["--help"]
