@@ -1,0 +1,148 @@
+name: Converter PDF para Kindle
+
+on:
+  # Automático: roda sempre que um PDF for adicionado à pasta input/
+  push:
+    paths:
+      - "input/**.pdf"
+      - "input/**.PDF"
+
+  # Manual: aba Actions > "Converter PDF para Kindle" > Run workflow
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Link direto para um PDF (opcional; vazio = converte o que estiver em input/)"
+        required: false
+        default: ""
+      modo:
+        description: "auto = detecta colunas | largura = uma coluna | pagina = página inteira (HQ, slides)"
+        type: choice
+        options: [auto, largura, pagina]
+        default: auto
+      orientacao:
+        description: "paisagem = letra ~33% maior (leia com o Kindle deitado)"
+        type: choice
+        options: [retrato, paisagem]
+        default: retrato
+      tipo:
+        description: "imagem = mais nítido no e-ink | vetorial = texto pesquisável"
+        type: choice
+        options: [imagem, vetorial]
+        default: imagem
+      opcoes:
+        description: "Opções extras do convert.py (ex.: --ignorar-base 15 --paginas 1-50)"
+        required: false
+        default: ""
+      enviar_kindle:
+        description: "Enviar para o Kindle por e-mail"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # para apagar os PDFs já convertidos de input/
+
+# Uma conversão por vez; as seguintes esperam na fila.
+concurrency:
+  group: kindle-converter
+  cancel-in-progress: false
+
+jobs:
+  converter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Execuções automáticas (push) usam as variáveis do repositório, se existirem.
+      MODO: ${{ inputs.modo || vars.KINDLE_MODO || 'auto' }}
+      ORIENTACAO: ${{ inputs.orientacao || vars.KINDLE_ORIENTACAO || 'retrato' }}
+      TIPO: ${{ inputs.tipo || vars.KINDLE_TIPO || 'imagem' }}
+      OPCOES: ${{ inputs.opcoes || vars.KINDLE_OPCOES || '' }}
+
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}   # pega a versão mais recente, não só a do push
+
+      - name: Preparar o Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Baixar PDF do link
+        if: ${{ inputs.url }}
+        env:
+          URL: ${{ inputs.url }}
+        run: |
+          mkdir -p input
+          nome=$(basename "${URL%%\?*}")
+          case "$nome" in
+            *.pdf|*.PDF) ;;
+            *) nome="download.pdf" ;;
+          esac
+          curl -fsSL --retry 3 -o "input/$nome" "$URL"
+          if ! head -c 5 "input/$nome" | grep -q '%PDF-'; then
+            echo "::error::O link não devolveu um PDF. Use um link de download direto."
+            exit 1
+          fi
+
+      - name: Converter
+        run: |
+          mkdir -p input
+          # shellcheck disable=SC2086
+          python convert.py input -o output \
+            --modo "$MODO" --orientacao "$ORIENTACAO" --tipo "$TIPO" $OPCOES
+
+      - name: Verificar resultado
+        id: resultado
+        if: ${{ !cancelled() }}
+        run: |
+          if compgen -G "output/*" > /dev/null; then
+            echo "tem=true" >> "$GITHUB_OUTPUT"
+            ls -lh output/
+          else
+            echo "tem=false" >> "$GITHUB_OUTPUT"
+            echo "Nenhum arquivo convertido."
+          fi
+
+      - name: Disponibilizar para download
+        if: ${{ !cancelled() && steps.resultado.outputs.tem == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kindle-${{ github.run_number }}
+          path: output/
+          retention-days: 30
+
+      - name: Enviar para o Kindle
+        if: ${{ !cancelled() && steps.resultado.outputs.tem == 'true' && (github.event_name == 'push' || inputs.enviar_kindle) }}
+        env:
+          KINDLE_EMAIL: ${{ secrets.KINDLE_EMAIL }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+        run: python send_to_kindle.py output
+
+      - name: Apagar de input/ os PDFs já convertidos
+        if: ${{ !cancelled() && steps.resultado.outputs.tem == 'true' }}
+        run: |
+          shopt -s nullglob globstar nocaseglob
+          for f in input/**/*.pdf; do
+            base=$(basename "${f%.*}")
+            if [ -e "output/${base}_kindle.pdf" ] || [ -e "output/${base}_kindle.cbz" ]; then
+              git rm -q --ignore-unmatch -- "$f"
+            fi
+          done
+          if git diff --cached --quiet; then
+            echo "Nada para apagar."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "Remove PDFs já convertidos"
+          git pull -q --rebase
+          git push -q
