@@ -14,13 +14,19 @@ FROM ${PYTHON_IMAGE}
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore
 
 WORKDIR /app
 
 # Dependências primeiro: a camada fica em cache enquanto requirements.txt não mudar.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# O pip só é necessário para instalar as dependências. Ele é removido em seguida
+# porque traz bibliotecas embutidas (pip/_vendor: msgpack, pkg_resources do
+# setuptools) que o Trivy aponta com vulnerabilidades; o conversor não usa o pip.
+RUN python -m pip install --no-cache-dir -r requirements.txt \
+    && python -m pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3.*/ensurepip/_bundled
 
 COPY convert.py send_to_kindle.py ./
 
