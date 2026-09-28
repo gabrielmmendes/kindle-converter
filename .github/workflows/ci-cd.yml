@@ -84,7 +84,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Actionlint (sintaxe e segurança dos workflows, com shellcheck)
         run: |
-          pip install actionlint-py==1.7.12.25
+          pip install "$(grep ^actionlint-py requirements-dev.txt)"
           actionlint -color
       - name: Hadolint (boas práticas do Dockerfile)
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
@@ -107,7 +107,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Instalar Bandit
-        run: pip install "bandit[sarif,toml]>=1.8"
+        run: pip install "$(grep ^bandit requirements-dev.txt)"
       - name: Bandit (relatório SARIF completo)
         run: bandit -c pyproject.toml -r . -f sarif -o bandit.sarif --exit-zero
       - name: Bandit (barra severidade média ou alta)

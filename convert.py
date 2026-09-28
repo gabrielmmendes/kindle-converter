@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
+import numpy.typing as npt
 import pymupdf
 from PIL import Image
 
@@ -118,9 +119,9 @@ class Opcoes:
 # --------------------------------------------------------------------------- #
 # Utilitários
 # --------------------------------------------------------------------------- #
-def trechos(mascara: np.ndarray) -> list[tuple[int, int]]:
+def trechos(mascara: npt.ArrayLike) -> list[tuple[int, int]]:
     """Sequências de True em um vetor booleano, como pares (início, fim)."""
-    m = np.concatenate(([False], mascara, [False])).astype(np.int8)
+    m = np.concatenate(([False], np.asarray(mascara, dtype=bool), [False])).astype(np.int8)
     d = np.diff(m)
     return list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist(), strict=False))
 

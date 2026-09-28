@@ -31,10 +31,20 @@ known-first-party = ["convert", "send_to_kindle", "fabrica_pdf"]
 quote-style = "double"
 
 [tool.mypy]
-python_version = "3.10"
+# Sem python_version: o mypy usa a versão do Python que está rodando. Fixar 3.10
+# quebra a leitura dos stubs do NumPy >= 2.5, que usam sintaxe do Python 3.12.
+# A compatibilidade com 3.10 é garantida pelo Ruff (target-version) e pelos
+# testes na matriz com Python 3.10.
 ignore_missing_imports = true
 warn_unused_ignores = true
 check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# As anotações de tipo do PyMuPDF estão incompletas (ex.: dizem que Document não é
+# iterável). A biblioteca é tratada como sem tipos para evitar falsos positivos.
+module = ["pymupdf", "pymupdf.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
